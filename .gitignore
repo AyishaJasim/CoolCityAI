@@ -1,0 +1,15 @@
+venv/
+__pycache__/
+*.pyc
+.env
+*.json
+.streamlit/secrets.toml
+
+app_backup*.py
+app_final_backup.py
+current_app.txt
+
+test_*.py
+test.jpg
+
+*.html
