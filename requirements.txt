@@ -5,3 +5,4 @@ requests
 Pillow
 earthengine-api
 streamlit-geolocation
+google-auth
