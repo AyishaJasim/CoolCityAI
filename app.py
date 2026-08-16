@@ -6,7 +6,7 @@ import pandas as pd
 import numpy as np
 
 # ============================================================
-# OPTIONAL LIBRARIES
+# OPTIONAL / REQUIRED LIBRARIES
 # ============================================================
 
 try:
@@ -14,6 +14,12 @@ try:
     EE_AVAILABLE = True
 except Exception:
     EE_AVAILABLE = False
+
+try:
+    from google.oauth2 import service_account
+    GOOGLE_AUTH_AVAILABLE = True
+except Exception:
+    GOOGLE_AUTH_AVAILABLE = False
 
 try:
     from streamlit_geolocation import streamlit_geolocation
@@ -129,9 +135,10 @@ st.sidebar.write(
     "Choose the area you want CoolCity AI to analyse."
 )
 
-# ------------------------------------------------------------
+
+# ============================================================
 # AUTOMATIC LOCATION
-# ------------------------------------------------------------
+# ============================================================
 
 st.sidebar.subheader("Automatic location")
 
@@ -176,9 +183,10 @@ else:
         "Location component is not installed."
     )
 
-# ------------------------------------------------------------
+
+# ============================================================
 # MANUAL COORDINATES
-# ------------------------------------------------------------
+# ============================================================
 
 st.sidebar.subheader("Manual coordinates")
 
@@ -210,9 +218,10 @@ if st.sidebar.button(
     st.session_state.satellite = None
     st.session_state.photo_results = None
 
-# ------------------------------------------------------------
+
+# ============================================================
 # CURRENT LOCATION
-# ------------------------------------------------------------
+# ============================================================
 
 if (
     st.session_state.latitude is not None
@@ -295,7 +304,7 @@ def get_weather(latitude, longitude):
 
 
 # ============================================================
-# EARTH ENGINE
+# EARTH ENGINE INITIALIZATION
 # ============================================================
 
 def initialize_earth_engine():
@@ -305,6 +314,80 @@ def initialize_earth_engine():
         return False, (
             "Google Earth Engine is not installed."
         )
+
+    # ========================================================
+    # STREAMLIT CLOUD — SERVICE ACCOUNT
+    # ========================================================
+
+    try:
+
+        secrets_available = False
+
+        try:
+            secrets_available = (
+                "gcp_service_account" in st.secrets
+            )
+        except Exception:
+            secrets_available = False
+
+        if secrets_available:
+
+            if not GOOGLE_AUTH_AVAILABLE:
+
+                return False, (
+                    "google-auth is not installed. "
+                    "Add google-auth to requirements.txt "
+                    "and redeploy the app."
+                )
+
+            service_account_info = dict(
+                st.secrets["gcp_service_account"]
+            )
+
+            project_id = service_account_info.get(
+                "project_id"
+            )
+
+            if not project_id:
+
+                return False, (
+                    "The gcp_service_account secret "
+                    "does not contain project_id."
+                )
+
+            credentials = (
+                service_account.Credentials
+                .from_service_account_info(
+                    service_account_info,
+                    scopes=[
+                        "https://www.googleapis.com/auth/cloud-platform"
+                    ],
+                )
+            )
+
+            ee.Initialize(
+                credentials=credentials,
+                project=project_id,
+            )
+
+            # Force a small request to verify credentials
+            ee.Number(1).getInfo()
+
+            return True, (
+                "Earth Engine connected using "
+                "the Streamlit Cloud service account."
+            )
+
+    except Exception as error:
+
+        cloud_error = str(error)
+
+        # Do NOT immediately return here.
+        # If running locally, try local authentication below.
+
+    # ========================================================
+    # LOCAL COMPUTER — EXISTING EE AUTHENTICATION
+    # ========================================================
 
     try:
 
@@ -317,11 +400,19 @@ def initialize_earth_engine():
             project=project
         )
 
-        return True, "Earth Engine connected."
+        ee.Number(1).getInfo()
+
+        return True, (
+            "Earth Engine connected using "
+            "local Earth Engine authentication."
+        )
 
     except Exception as error:
 
-        return False, str(error)
+        return False, (
+            "Earth Engine authentication failed.\n\n"
+            f"{error}"
+        )
 
 
 # ============================================================
@@ -361,9 +452,9 @@ def get_satellite_data(
 
         end_date = datetime.utcnow()
 
-        # ----------------------------------------------------
+        # ====================================================
         # SENTINEL-2
-        # ----------------------------------------------------
+        # ====================================================
 
         sentinel_collection = (
             ee.ImageCollection(
@@ -408,20 +499,23 @@ def get_satellite_data(
                 .rename("NDVI")
             )
 
-            ndvi_value = (
+            ndvi_result = (
                 ndvi.reduceRegion(
                     reducer=ee.Reducer.mean(),
                     geometry=region,
                     scale=20,
                     maxPixels=1e8,
                 )
-                .get("NDVI")
                 .getInfo()
             )
 
-        # ----------------------------------------------------
+            ndvi_value = ndvi_result.get(
+                "NDVI"
+            )
+
+        # ====================================================
         # LANDSAT 8
-        # ----------------------------------------------------
+        # ====================================================
 
         landsat_8 = (
             ee.ImageCollection(
@@ -440,9 +534,9 @@ def get_satellite_data(
             )
         )
 
-        # ----------------------------------------------------
+        # ====================================================
         # LANDSAT 9
-        # ----------------------------------------------------
+        # ====================================================
 
         landsat_9 = (
             ee.ImageCollection(
@@ -482,23 +576,32 @@ def get_satellite_data(
                 .first()
             )
 
+            # Landsat Collection 2 Level 2
+            # ST_B10 scaling:
+            # Kelvin = DN * 0.00341802 + 149.0
+            # Celsius = Kelvin - 273.15
+
             lst = (
                 image
                 .select("ST_B10")
                 .multiply(0.00341802)
                 .add(149.0)
                 .subtract(273.15)
+                .rename("LST")
             )
 
-            lst_value = (
+            lst_result = (
                 lst.reduceRegion(
                     reducer=ee.Reducer.mean(),
                     geometry=region,
                     scale=100,
                     maxPixels=1e8,
                 )
-                .get("ST_B10")
                 .getInfo()
+            )
+
+            lst_value = lst_result.get(
+                "LST"
             )
 
         return {
@@ -532,9 +635,9 @@ def calculate_heat_risk(
     score = 0
     factors = []
 
-    # --------------------------------------------------------
+    # ========================================================
     # AIR TEMPERATURE
-    # --------------------------------------------------------
+    # ========================================================
 
     if temperature is not None:
 
@@ -562,9 +665,9 @@ def calculate_heat_risk(
 
             score += 7
 
-    # --------------------------------------------------------
+    # ========================================================
     # HUMIDITY
-    # --------------------------------------------------------
+    # ========================================================
 
     if humidity is not None:
 
@@ -588,9 +691,9 @@ def calculate_heat_risk(
 
             score += 5
 
-    # --------------------------------------------------------
+    # ========================================================
     # NDVI
-    # --------------------------------------------------------
+    # ========================================================
 
     if ndvi is not None:
 
@@ -614,9 +717,9 @@ def calculate_heat_risk(
 
             score += 8
 
-    # --------------------------------------------------------
+    # ========================================================
     # LAND SURFACE TEMPERATURE
-    # --------------------------------------------------------
+    # ========================================================
 
     if lst is not None:
 
@@ -644,9 +747,9 @@ def calculate_heat_risk(
                 "Elevated land-surface temperature"
             )
 
-    # --------------------------------------------------------
+    # ========================================================
     # PHOTO ANALYSIS
-    # --------------------------------------------------------
+    # ========================================================
 
     if photo_results:
 
@@ -717,9 +820,9 @@ def generate_recommendations(
 
     recommendations = []
 
-    # --------------------------------------------------------
-    # SATELLITE-BASED
-    # --------------------------------------------------------
+    # ========================================================
+    # SATELLITE
+    # ========================================================
 
     if lst is not None and lst >= 40:
 
@@ -756,9 +859,9 @@ def generate_recommendations(
             )
         )
 
-    # --------------------------------------------------------
-    # WEATHER-BASED
-    # --------------------------------------------------------
+    # ========================================================
+    # WEATHER
+    # ========================================================
 
     if temperature is not None and temperature >= 35:
 
@@ -788,9 +891,9 @@ def generate_recommendations(
             )
         )
 
-    # --------------------------------------------------------
-    # PHOTO-BASED
-    # --------------------------------------------------------
+    # ========================================================
+    # PHOTO
+    # ========================================================
 
     if photo_results:
 
@@ -813,7 +916,7 @@ def generate_recommendations(
 
             recommendations.append(
                 (
-                    "🏠 Consider reflective surfaces",
+                    "☀️ Consider reflective surfaces",
                     "The image contains highly bright/exposed surfaces. "
                     "Reflective or high-albedo materials may help reduce "
                     "heat absorption."
@@ -826,15 +929,15 @@ def generate_recommendations(
 
             recommendations.append(
                 (
-                    "🚶 Shade paved pedestrian areas",
+                    "🛣️ Shade paved pedestrian areas",
                     "The visual analysis suggests substantial exposed "
                     "hard surfaces. Prioritize shade along walking routes."
                 )
             )
 
-    # --------------------------------------------------------
-    # GENERAL RECOMMENDATIONS
-    # --------------------------------------------------------
+    # ========================================================
+    # GENERAL
+    # ========================================================
 
     recommendations.append(
         (
@@ -891,9 +994,7 @@ if lat is None or lon is None:
 
     with c1:
 
-        st.subheader(
-            "📍 Locate"
-        )
+        st.subheader("📍 Locate")
 
         st.write(
             "Use your location or enter coordinates manually."
@@ -901,9 +1002,7 @@ if lat is None or lon is None:
 
     with c2:
 
-        st.subheader(
-            "🛰️ Analyse"
-        )
+        st.subheader("🛰️ Analyse")
 
         st.write(
             "Combine weather and satellite environmental data."
@@ -911,9 +1010,7 @@ if lat is None or lon is None:
 
     with c3:
 
-        st.subheader(
-            "💡 Act"
-        )
+        st.subheader("🌱 Act")
 
         st.write(
             "Generate targeted urban cooling recommendations."
@@ -922,7 +1019,7 @@ if lat is None or lon is None:
 else:
 
     # ========================================================
-    # CURRENT WEATHER VALUES
+    # WEATHER VALUES
     # ========================================================
 
     temperature = None
@@ -954,7 +1051,7 @@ else:
         )
 
     # ========================================================
-    # CURRENT SATELLITE VALUES
+    # SATELLITE VALUES
     # ========================================================
 
     satellite = st.session_state.satellite
@@ -973,7 +1070,7 @@ else:
         )
 
     # ========================================================
-    # CALCULATE RISK
+    # RISK
     # ========================================================
 
     score, level, priority, factors = (
@@ -987,7 +1084,7 @@ else:
     )
 
     # ========================================================
-    # DASHBOARD HEADER
+    # HEADER
     # ========================================================
 
     st.markdown(
@@ -1091,7 +1188,7 @@ else:
     if factors:
 
         st.subheader(
-            "🔎 Factors influencing the assessment"
+            "🔍 Factors influencing the assessment"
         )
 
         for factor in factors:
@@ -1132,7 +1229,7 @@ tab1, tab2, tab3, tab4 = st.tabs(
         "🛰️ Satellite Intelligence",
         "📊 Environmental Data",
         "📷 Photo Analysis",
-        "💡 Cooling Plan",
+        "🌱 Cooling Plan",
     ]
 )
 
@@ -1158,7 +1255,8 @@ with tab1:
         st.write(
             """
             Analyse vegetation and land-surface temperature
-            around the selected location using satellite imagery.
+            around the selected location using real satellite
+            imagery from Google Earth Engine.
             """
         )
 
@@ -1181,7 +1279,7 @@ with tab1:
                 st.session_state.satellite = result
 
                 st.success(
-                    "Satellite analysis completed."
+                    "Satellite analysis completed successfully."
                 )
 
                 st.rerun()
@@ -1189,7 +1287,7 @@ with tab1:
             else:
 
                 st.error(
-                    "Satellite analysis failed."
+                    "❌ Satellite analysis failed."
                 )
 
                 st.code(
@@ -1239,11 +1337,15 @@ with tab1:
                 )
 
                 st.metric(
-                    "🛰️ Images Used",
+                    "🛰️ Images Available",
                     total_images,
                 )
 
             st.divider()
+
+            # =================================================
+            # NDVI
+            # =================================================
 
             if satellite.get("ndvi") is not None:
 
@@ -1276,6 +1378,10 @@ with tab1:
                     st.success(
                         "Relatively high vegetation detected."
                     )
+
+            # =================================================
+            # LST
+            # =================================================
 
             if satellite.get("lst") is not None:
 
@@ -1331,7 +1437,7 @@ with tab2:
         if weather:
 
             st.subheader(
-                "🌤️ Current Weather"
+                "🌡️ Current Weather"
             )
 
             current = weather.get(
@@ -1473,10 +1579,6 @@ with tab3:
                 ) / 2
             )
 
-            # ------------------------------------------------
-            # BASIC VISUAL CLASSIFICATION
-            # ------------------------------------------------
-
             low_vegetation = (
                 green_strength <= 5
             )
@@ -1522,10 +1624,6 @@ with tab3:
                 photo_results
             )
 
-            # ------------------------------------------------
-            # DISPLAY
-            # ------------------------------------------------
-
             c1, c2, c3 = st.columns(3)
 
             with c1:
@@ -1552,7 +1650,7 @@ with tab3:
             st.divider()
 
             st.subheader(
-                "🔎 Visual findings"
+                "🔍 Visual findings"
             )
 
             if low_vegetation:
@@ -1597,7 +1695,7 @@ with tab3:
 with tab4:
 
     st.header(
-        "💡 Cooling Plan"
+        "🌱 Cooling Plan"
     )
 
     if lat is None or lon is None:
@@ -1607,10 +1705,6 @@ with tab4:
         )
 
     else:
-
-        # ----------------------------------------------------
-        # GET CURRENT DATA
-        # ----------------------------------------------------
 
         temperature = None
         humidity = None
@@ -1650,12 +1744,12 @@ with tab4:
             st.session_state.photo_results
         )
 
-        # ----------------------------------------------------
+        # ====================================================
         # DATA STATUS
-        # ----------------------------------------------------
+        # ====================================================
 
         st.subheader(
-            "🔬 Analysis used for this plan"
+            "🔄 Analysis used for this plan"
         )
 
         d1, d2, d3 = st.columns(3)
@@ -1665,13 +1759,13 @@ with tab4:
             if weather:
 
                 st.success(
-                    "🌤️ Weather data available"
+                    "🌡️ Weather data available"
                 )
 
             else:
 
                 st.warning(
-                    "🌤️ Weather unavailable"
+                    "🌡️ Weather unavailable"
                 )
 
         with d2:
@@ -1704,9 +1798,9 @@ with tab4:
 
         st.divider()
 
-        # ----------------------------------------------------
-        # CALCULATE FINAL RISK
-        # ----------------------------------------------------
+        # ====================================================
+        # FINAL RISK
+        # ====================================================
 
         final_score, final_level, final_priority, final_factors = (
             calculate_heat_risk(
@@ -1740,9 +1834,9 @@ with tab4:
             unsafe_allow_html=True,
         )
 
-        # ----------------------------------------------------
-        # GENERATE PLAN
-        # ----------------------------------------------------
+        # ====================================================
+        # RECOMMENDATIONS
+        # ====================================================
 
         recommendations = (
             generate_recommendations(
@@ -1755,7 +1849,7 @@ with tab4:
         )
 
         st.subheader(
-            "🎯 Recommended interventions"
+            "💡 Recommended interventions"
         )
 
         for title, explanation in recommendations:
@@ -1771,6 +1865,10 @@ with tab4:
             )
 
         st.divider()
+
+        # ====================================================
+        # DECISION SUMMARY
+        # ====================================================
 
         st.subheader(
             "📋 Decision summary"
